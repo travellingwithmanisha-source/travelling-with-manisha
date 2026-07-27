@@ -64,14 +64,6 @@ export async function getHomestayBySlug(slug: string) {
   });
 }
 
-/** Id-based counterpart to getHomestayBySlug — used by dynamic API routes. */
-export async function getHomestayById(id: string) {
-  return prisma.homestay.findUnique({
-    where: { id },
-    include: { destination: true, rooms: { where: { isActive: true } } },
-  });
-}
-
 export async function searchTourPackages(input: TripSearchInput) {
   const where: Prisma.TourPackageWhereInput = {
     status: TourPackageStatus.PUBLISHED,
@@ -107,14 +99,6 @@ export async function getTourPackageBySlug(slug: string) {
       itineraryDays: { orderBy: { dayNumber: "asc" } },
       reviews: { where: { isApproved: true }, take: 10, orderBy: { createdAt: "desc" } },
     },
-  });
-}
-
-/** Id-based counterpart to getTourPackageBySlug — used by dynamic API routes. */
-export async function getTourPackageById(id: string) {
-  return prisma.tourPackage.findUnique({
-    where: { id },
-    include: { destination: true, itineraryDays: { orderBy: { dayNumber: "asc" } } },
   });
 }
 
