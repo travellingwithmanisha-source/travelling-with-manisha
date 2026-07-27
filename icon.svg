@@ -1,0 +1,7 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Placeholder mark for Travelling with Manisha. Replace with the real
+       brand icon before launch — this exists only so app/layout.tsx has a
+       real file to point its icon metadata at. -->
+  <rect width="64" height="64" rx="14" fill="#0f172a"/>
+  <path d="M14 40 L32 16 L50 40 L38 40 L38 50 L26 50 L26 40 Z" fill="#f8fafc"/>
+</svg>
