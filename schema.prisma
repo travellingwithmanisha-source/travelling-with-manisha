@@ -1,0 +1,1000 @@
+// ─────────────────────────────────────────────────────────────────────────
+// Travelling with Manisha — Prisma Schema
+// Phase 1: Database Design (rev. 2 — senior architecture review pass,
+// reviewed against a 100,000+ user production target)
+//
+// Design decisions are documented inline with `///` doc-comments above the
+// relevant model/field, plus a summary block at the bottom of this file.
+// ─────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  TRAVELER
+  HOMESTAY_OWNER
+  ADMIN
+  SUPER_ADMIN
+
+  @@map("role")
+}
+
+enum HomestayStatus {
+  DRAFT
+  PENDING_APPROVAL
+  PUBLISHED
+  SUSPENDED
+  ARCHIVED
+
+  @@map("homestay_status")
+}
+
+enum TourPackageStatus {
+  DRAFT
+  PENDING_APPROVAL
+  PUBLISHED
+  ARCHIVED
+
+  @@map("tour_package_status")
+}
+
+enum BlogStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+
+  @@map("blog_status")
+}
+
+enum BookingType {
+  HOMESTAY
+  TOUR_PACKAGE
+
+  @@map("booking_type")
+}
+
+enum BookingStatus {
+  PENDING
+  AWAITING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+
+  @@map("booking_status")
+}
+
+enum PaymentGateway {
+  STRIPE
+  RAZORPAY
+
+  @@map("payment_gateway")
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  CANCELLED
+
+  @@map("payment_status")
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PROCESSING
+  PROCESSED
+  FAILED
+
+  @@map("refund_status")
+}
+
+enum AvailabilityStatus {
+  AVAILABLE
+  BOOKED
+  BLOCKED
+  MAINTENANCE
+
+  @@map("availability_status")
+}
+
+enum TargetType {
+  HOMESTAY
+  TOUR_PACKAGE
+
+  @@map("target_type")
+}
+
+enum CouponType {
+  PERCENTAGE
+  FIXED_AMOUNT
+
+  @@map("coupon_type")
+}
+
+enum CouponAppliesTo {
+  ALL
+  HOMESTAY
+  TOUR_PACKAGE
+
+  @@map("coupon_applies_to")
+}
+
+enum NotificationType {
+  BOOKING_CREATED
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  PAYMENT_SUCCEEDED
+  PAYMENT_FAILED
+  REFUND_PROCESSED
+  REVIEW_RECEIVED
+  OWNER_RESPONSE
+  SYSTEM
+  PROMOTIONAL
+
+  @@map("notification_type")
+}
+
+/// Role within a Homestay's management team. `OWNER` is the billing/legal
+/// owner (mirrors Homestay.ownerId); `MANAGER`/`STAFF` are added via
+/// HomestayStaff for properties run by a team rather than a single person.
+enum HomestayStaffRole {
+  OWNER
+  MANAGER
+  STAFF
+
+  @@map("homestay_staff_role")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// USERS & PROFILES
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Single table for all account types (Traveler / Homestay Owner / Admin /
+/// Super Admin) discriminated by `role`. Auth identity itself is owned by
+/// Supabase Auth — `supabaseId` links this row to `auth.users.id`. Keeping
+/// one table (instead of one per role) avoids duplicating shared fields
+/// (email, name, avatar) and keeps every FK in the schema (Booking.userId,
+/// Review.userId, etc.) pointing at a single, simple target.
+///
+/// GDPR: rows are never hard-deleted while financial/legal records
+/// reference them (see cascade strategy notes below). A "right to
+/// erasure" request is fulfilled by scrubbing PII (email, phone, name,
+/// avatar overwritten with placeholders) and setting `anonymizedAt`,
+/// not by deleting the row — this preserves referential integrity of
+/// Bookings/Payments/Reviews while removing personal data.
+model User {
+  id              String    @id @default(uuid()) @db.Uuid
+  /// FK to Supabase `auth.users.id`. Nullable only to support pre-invited
+  /// staff/admin rows created before their first login.
+  supabaseId      String?   @unique @map("supabase_id") @db.Uuid
+  email           String    @unique
+  phone           String?   @unique
+  firstName       String    @map("first_name")
+  lastName        String    @map("last_name")
+  avatarUrl       String?   @map("avatar_url")
+  role            Role      @default(TRAVELER)
+  /// ISO 639-1 code (e.g. "en", "hi"), drives which *Translation row is
+  /// preferred when rendering content for this user.
+  locale          String    @default("en") @db.VarChar(10)
+  isEmailVerified Boolean   @default(false) @map("is_email_verified")
+  isPhoneVerified Boolean   @default(false) @map("is_phone_verified")
+  isActive        Boolean   @default(true) @map("is_active")
+  lastLoginAt     DateTime? @map("last_login_at")
+
+  /// GDPR / marketing-consent audit trail.
+  marketingConsent  Boolean   @default(false) @map("marketing_consent")
+  consentUpdatedAt  DateTime? @map("consent_updated_at")
+  /// Set when a right-to-erasure request has been fulfilled by PII
+  /// scrubbing (see model doc-comment above). Row itself is retained.
+  anonymizedAt      DateTime? @map("anonymized_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  /// Soft delete: users are never hard-deleted because they are referenced
+  /// by immutable financial/legal records (Payment, Refund, Booking).
+  deletedAt DateTime? @map("deleted_at")
+
+  ownerProfile            OwnerProfile?
+  homestaysOwned          Homestay[]         @relation("HomestayOwner")
+  homestayStaffOf         HomestayStaff[]    @relation("HomestayStaffMember")
+  homestayInvitationsSent HomestayStaff[]    @relation("HomestayStaffInvitedBy")
+  tourPackages            TourPackage[]      @relation("TourPackageCreatedBy")
+  blogs             Blog[]             @relation("BlogAuthor")
+  bookings          Booking[]          @relation("BookingUser")
+  reviews           Review[]           @relation("ReviewUser")
+  wishlistItems     WishlistItem[]
+  notifications     Notification[]
+  couponsCreated    Coupon[]           @relation("CouponCreatedBy")
+  couponUsages      CouponUsage[]
+  refundsRequested  Refund[]           @relation("RefundRequestedBy")
+  refundsProcessed  Refund[]           @relation("RefundProcessedBy")
+  auditLogs         AuditLog[]
+
+  @@index([role, isActive])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+/// Extra fields specific to Homestay Owners only. Split out from `User`
+/// (1:1) rather than adding nullable columns to every user row, since most
+/// of these fields (payout details, verification) are meaningless for
+/// travelers/admins.
+model OwnerProfile {
+  id                     String    @id @default(uuid()) @db.Uuid
+  userId                 String    @unique @map("user_id") @db.Uuid
+  businessName           String?   @map("business_name")
+  businessRegistrationNo String?   @map("business_registration_no")
+  payoutMethod           String?   @map("payout_method")
+  /// SECURITY: do not store raw bank account / card numbers here. Prefer a
+  /// tokenized reference (e.g. a Stripe Connect account id or Razorpay
+  /// Route account id) issued by the payment provider. If any raw payout
+  /// data must be kept, it must be encrypted at the application layer
+  /// (column-level encryption / a secrets vault), not stored as plaintext
+  /// JSON — Postgres disk/backups are not an acceptable trust boundary
+  /// for bank details.
+  payoutProviderAccountId String?  @map("payout_provider_account_id")
+  payoutDetails          Json?     @map("payout_details")
+  isVerified             Boolean   @default(false) @map("is_verified")
+  verifiedAt             DateTime? @map("verified_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("owner_profiles")
+}
+
+/// Co-management for homestays run by a team rather than a single owner
+/// (multi-owner scalability). `Homestay.ownerId` remains the sole
+/// billing/legal owner and the fast-path FK for the common case; this
+/// table adds MANAGER/STAFF (and a redundant OWNER row for uniform
+/// permission-checking) without forcing every query through a join for
+/// the 95% of homestays with a single owner.
+model HomestayStaff {
+  id          String            @id @default(uuid()) @db.Uuid
+  homestayId  String            @map("homestay_id") @db.Uuid
+  userId      String            @map("user_id") @db.Uuid
+  role        HomestayStaffRole @default(STAFF)
+  /// Who added this person to the homestay's team. Always exactly one
+  /// User — never polymorphic — so unlike Notification.relatedEntityId
+  /// (which genuinely can't have a single FK target), this gets a real,
+  /// enforced foreign key. SetNull (not Restrict): the inviter is a
+  /// secondary participant in this record, not its owner, so their
+  /// account must remain removable later without being blocked by, or
+  /// cascading into, staff rows they invited.
+  invitedById String?           @map("invited_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  homestay  Homestay @relation(fields: [homestayId], references: [id], onDelete: Cascade)
+  user      User     @relation("HomestayStaffMember", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy User?    @relation("HomestayStaffInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@unique([homestayId, userId])
+  @@index([userId])
+  @@index([invitedById])
+  @@map("homestay_staff")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DESTINATIONS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Destination {
+  id            String   @id @default(uuid()) @db.Uuid
+  name          String
+  slug          String   @unique
+  description   String?
+  country       String
+  state         String?
+  city          String?
+  latitude      Decimal? @db.Decimal(9, 6)
+  longitude     Decimal? @db.Decimal(9, 6)
+  coverImageUrl String?  @map("cover_image_url")
+  images        String[]
+  isActive      Boolean  @default(true) @map("is_active")
+
+  /// SEO
+  metaTitle       String? @map("meta_title")
+  metaDescription String? @map("meta_description")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  homestays     Homestay[]
+  tourPackages  TourPackage[]
+  translations  DestinationTranslation[]
+
+  @@index([country, state, city])
+  @@index([isActive, deletedAt])
+  @@map("destinations")
+}
+
+/// Locale-specific overrides for translatable Destination content.
+/// Falling back to the base `Destination.name/description` (assumed to be
+/// the default/source locale) when no row exists for a requested locale
+/// keeps this additive rather than a breaking migration of existing data.
+model DestinationTranslation {
+  id            String @id @default(uuid()) @db.Uuid
+  destinationId String @map("destination_id") @db.Uuid
+  locale        String @db.VarChar(10)
+  name          String
+  description   String?
+
+  destination Destination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@unique([destinationId, locale])
+  @@map("destination_translations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// HOMESTAYS & ROOMS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Homestay {
+  id            String         @id @default(uuid()) @db.Uuid
+  ownerId       String         @map("owner_id") @db.Uuid
+  destinationId String         @map("destination_id") @db.Uuid
+  name          String
+  slug          String         @unique
+  description   String?
+  address       String
+  latitude      Decimal?       @db.Decimal(9, 6)
+  longitude     Decimal?       @db.Decimal(9, 6)
+  amenities     String[]
+  houseRules    String[]       @map("house_rules")
+  checkInTime   String         @map("check_in_time") // e.g. "14:00"
+  checkOutTime  String         @map("check_out_time") // e.g. "11:00"
+  coverImageUrl String?        @map("cover_image_url")
+  images        String[]
+  status        HomestayStatus @default(DRAFT)
+
+  /// Denormalized aggregates, recomputed whenever a Review is created,
+  /// updated, or removed. Avoids an AVG()/COUNT() aggregation over Reviews
+  /// on every listing/search page read, which is by far the hottest read
+  /// path at scale.
+  averageRating Decimal @default(0) @map("average_rating") @db.Decimal(3, 2)
+  totalReviews  Int     @default(0) @map("total_reviews")
+  /// Denormalized min(Room.basePrice) across active rooms, refreshed by
+  /// the service layer whenever a Room's price/active-state changes.
+  /// Lets search/listing pages render "from ₹X,XXX" without joining and
+  /// aggregating Rooms per homestay — the classic N+1 risk on a listings
+  /// grid is avoided entirely by reading this single column.
+  startingPrice Decimal? @map("starting_price") @db.Decimal(10, 2)
+  viewCount     Int      @default(0) @map("view_count")
+
+  /// SEO
+  metaTitle       String? @map("meta_title")
+  metaDescription String? @map("meta_description")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  owner        User             @relation("HomestayOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  destination  Destination      @relation(fields: [destinationId], references: [id], onDelete: Restrict)
+  staff        HomestayStaff[]
+  rooms        Room[]
+  bookings     Booking[]
+  reviews      Review[]
+  wishlistedBy WishlistItem[]
+  coupons      Coupon[]
+  translations HomestayTranslation[]
+
+  @@index([ownerId])
+  @@index([destinationId, status, deletedAt])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("homestays")
+}
+
+model HomestayTranslation {
+  id          String  @id @default(uuid()) @db.Uuid
+  homestayId  String  @map("homestay_id") @db.Uuid
+  locale      String  @db.VarChar(10)
+  name        String
+  description String?
+
+  homestay Homestay @relation(fields: [homestayId], references: [id], onDelete: Cascade)
+
+  @@unique([homestayId, locale])
+  @@map("homestay_translations")
+}
+
+model Room {
+  id           String  @id @default(uuid()) @db.Uuid
+  homestayId   String  @map("homestay_id") @db.Uuid
+  name         String
+  description  String?
+  roomType     String  @map("room_type") // e.g. "Private Room", "Entire Cottage"
+  maxOccupancy Int     @map("max_occupancy")
+  basePrice    Decimal @map("base_price") @db.Decimal(10, 2)
+  currency     String  @default("INR") @db.Char(3)
+  /// Number of physically identical units of this room type in the
+  /// homestay (e.g. 3 "Deluxe Double" rooms). AvailabilityCalendar tracks
+  /// how many of these are open per date, enabling multi-unit inventory
+  /// without one row per physical room.
+  totalUnits   Int     @default(1) @map("total_units")
+  amenities    String[]
+  images       String[]
+  isActive     Boolean @default(true) @map("is_active")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  homestay     Homestay               @relation(fields: [homestayId], references: [id], onDelete: Cascade)
+  bookings     Booking[]
+  availability AvailabilityCalendar[]
+
+  @@index([homestayId, isActive])
+  @@map("rooms")
+}
+
+/// One row per (room, date). This is the source of truth for both
+/// searchability ("is this room free June 1–5?") and overbooking
+/// prevention.
+///
+/// RACE CONDITIONS / LOCKING STRATEGY (service-layer, documented here
+/// since it governs how this table must be written to):
+///   1. Booking creation must run inside a single DB transaction.
+///   2. Lock the date-range rows for the target room first, e.g.
+///      `SELECT ... FROM availability_calendar WHERE room_id = $1
+///       AND date BETWEEN $2 AND $3 FOR UPDATE`, then verify every row has
+///      `available_units >= requested_units` before decrementing. This
+///      pessimistic row lock serializes concurrent bookings for the same
+///      room/date-range and is the primary defense against double-booking.
+///   3. `version` below supports an optimistic-concurrency fallback for
+///      lower-contention paths (e.g. admin block/unblock of a single
+///      date): read version, write `WHERE id = $1 AND version = $2`,
+///      retry on 0 rows affected.
+///   4. For an even stronger DB-level guarantee, a future migration can
+///      add a Postgres EXCLUDE constraint (via the `btree_gist`
+///      extension) preventing overlapping CONFIRMED bookings for the same
+///      room at the database level — Prisma's schema language cannot
+///      express EXCLUDE constraints, so this must be added as raw SQL in
+///      a migration, not here.
+///
+/// SCALE NOTE: at 100k+ users this table grows by (rooms × 365) rows per
+/// year. Only generate a rolling window (e.g. 18 months ahead) rather than
+/// materializing years of future dates up front, and consider native
+/// Postgres range-partitioning by `date` once row counts reach the
+/// tens-of-millions range.
+model AvailabilityCalendar {
+  id             String             @id @default(uuid()) @db.Uuid
+  roomId         String             @map("room_id") @db.Uuid
+  date           DateTime           @db.Date
+  status         AvailabilityStatus @default(AVAILABLE)
+  /// Units still bookable for this room type on this date (<= Room.totalUnits).
+  availableUnits Int                @map("available_units")
+  /// Optional per-date price override (weekends, holidays, seasonal pricing)
+  /// that takes precedence over Room.basePrice.
+  priceOverride  Decimal?           @map("price_override") @db.Decimal(10, 2)
+  /// Optimistic-concurrency token — see locking strategy note above.
+  version        Int                @default(0)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  /// One entry per room per calendar day.
+  @@unique([roomId, date])
+  @@index([date, status])
+  @@map("availability_calendar")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TOUR PACKAGES & ITINERARY
+// ─────────────────────────────────────────────────────────────────────────
+
+model TourPackage {
+  id             String            @id @default(uuid()) @db.Uuid
+  destinationId  String            @map("destination_id") @db.Uuid
+  createdById    String            @map("created_by_id") @db.Uuid
+  title          String
+  slug           String            @unique
+  description    String?
+  durationDays   Int               @map("duration_days")
+  durationNights Int               @map("duration_nights")
+  basePrice      Decimal           @map("base_price") @db.Decimal(10, 2)
+  currency       String            @default("INR") @db.Char(3)
+  maxGroupSize   Int               @map("max_group_size")
+  inclusions     String[]
+  exclusions     String[]
+  coverImageUrl  String?           @map("cover_image_url")
+  images         String[]
+  status         TourPackageStatus @default(DRAFT)
+  averageRating  Decimal           @default(0) @map("average_rating") @db.Decimal(3, 2)
+  totalReviews   Int               @default(0) @map("total_reviews")
+  viewCount      Int               @default(0) @map("view_count")
+
+  /// SEO
+  metaTitle       String? @map("meta_title")
+  metaDescription String? @map("meta_description")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  destination   Destination             @relation(fields: [destinationId], references: [id], onDelete: Restrict)
+  createdBy     User                    @relation("TourPackageCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  itineraryDays Itinerary[]
+  bookings      Booking[]
+  reviews       Review[]
+  wishlistedBy  WishlistItem[]
+  coupons       Coupon[]
+  translations  TourPackageTranslation[]
+
+  @@index([destinationId, status, deletedAt])
+  @@index([status])
+  @@index([createdById])
+  @@map("tour_packages")
+}
+
+model TourPackageTranslation {
+  id            String  @id @default(uuid()) @db.Uuid
+  tourPackageId String  @map("tour_package_id") @db.Uuid
+  locale        String  @db.VarChar(10)
+  title         String
+  description   String?
+
+  tourPackage TourPackage @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+
+  @@unique([tourPackageId, locale])
+  @@map("tour_package_translations")
+}
+
+model Itinerary {
+  id            String   @id @default(uuid()) @db.Uuid
+  tourPackageId String   @map("tour_package_id") @db.Uuid
+  dayNumber     Int      @map("day_number")
+  title         String
+  description   String?
+  activities    String[]
+  meals         String[] // e.g. ["Breakfast", "Dinner"]
+  location      String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tourPackage TourPackage @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+
+  /// A tour package has exactly one itinerary entry per day number.
+  @@unique([tourPackageId, dayNumber])
+  @@map("itineraries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// BOOKINGS, PAYMENTS & REFUNDS
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A single Booking model serves both Homestay stays and Tour Package
+/// bookings, discriminated by `type`. `homestayId`/`roomId` are populated
+/// for HOMESTAY bookings, `tourPackageId` for TOUR_PACKAGE bookings — the
+/// unused side stays null. See "Polymorphic associations" note at the
+/// bottom of this file for how the exactly-one-of constraint is enforced.
+model Booking {
+  id            String      @id @default(uuid()) @db.Uuid
+  /// Short, human-readable reference shown to users/support (e.g.
+  /// "TWM-2026-000123"), separate from the internal UUID.
+  bookingNumber String      @unique @map("booking_number")
+  type          BookingType
+  userId        String      @map("user_id") @db.Uuid
+
+  homestayId    String? @map("homestay_id") @db.Uuid
+  roomId        String? @map("room_id") @db.Uuid
+  tourPackageId String? @map("tour_package_id") @db.Uuid
+
+  /// Check-in date (homestay) or tour start date (tour package).
+  startDate DateTime @map("start_date") @db.Date
+  /// Check-out date (homestay) or tour end date (tour package).
+  endDate   DateTime @map("end_date") @db.Date
+
+  numberOfGuests Int           @map("number_of_guests")
+  numberOfUnits  Int           @default(1) @map("number_of_units") // rooms booked, or group size unit for tours
+  status         BookingStatus @default(PENDING)
+
+  subtotal       Decimal @db.Decimal(10, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(10, 2)
+  taxAmount      Decimal @default(0) @map("tax_amount") @db.Decimal(10, 2)
+  totalAmount    Decimal @map("total_amount") @db.Decimal(10, 2)
+  currency       String  @default("INR") @db.Char(3)
+
+  couponId            String?   @map("coupon_id") @db.Uuid
+  specialRequests     String?   @map("special_requests")
+  cancelledAt         DateTime? @map("cancelled_at")
+  cancellationReason  String?   @map("cancellation_reason")
+
+  /// Captured at booking-creation time for fraud detection / security
+  /// investigations (e.g. many bookings from one IP across many
+  /// accounts). Not used for any personalization.
+  ipAddress String? @map("ip_address")
+  userAgent String? @map("user_agent")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user        User         @relation("BookingUser", fields: [userId], references: [id], onDelete: Restrict)
+  homestay    Homestay?    @relation(fields: [homestayId], references: [id], onDelete: Restrict)
+  room        Room?        @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  tourPackage TourPackage? @relation(fields: [tourPackageId], references: [id], onDelete: Restrict)
+  /// Restrict (not SetNull): a booking's historical discount must remain
+  /// attributable to the coupon that produced it for financial reporting,
+  /// even after the coupon's promotional period ends. Coupons are
+  /// deactivated via `isActive`/`deletedAt`, never hard-deleted while
+  /// bookings reference them.
+  coupon      Coupon?      @relation(fields: [couponId], references: [id], onDelete: Restrict)
+
+  payments    Payment[]
+  refunds     Refund[]
+  review      Review?
+  couponUsage CouponUsage?
+
+  @@index([userId, status])
+  @@index([homestayId, status])
+  @@index([tourPackageId, status])
+  /// Covers the availability-overlap check ("does this room already have
+  /// a booking overlapping these dates?") — the single most
+  /// performance-critical query in the whole schema.
+  @@index([roomId, startDate, endDate])
+  @@index([couponId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("bookings")
+}
+
+/// A booking may have more than one Payment row over its lifetime (a
+/// failed attempt followed by a successful retry, or a deposit +
+/// balance-payment flow), so this is 1-to-many from Booking, never 1-to-1.
+model Payment {
+  id               String         @id @default(uuid()) @db.Uuid
+  bookingId        String         @map("booking_id") @db.Uuid
+  gateway          PaymentGateway
+  /// Stripe PaymentIntent id or Razorpay payment id.
+  gatewayPaymentId String?        @unique @map("gateway_payment_id")
+  /// Stripe Checkout Session / Razorpay Order id, set before the payment
+  /// itself exists (order created, payment pending).
+  gatewayOrderId   String?        @map("gateway_order_id")
+  /// Client-supplied idempotency key so a network retry from the browser
+  /// (double-click "Pay", connection drop) can never create two Payment
+  /// rows / two gateway charges for the same intent.
+  idempotencyKey   String?        @unique @map("idempotency_key")
+  amount           Decimal        @db.Decimal(10, 2)
+  currency         String         @db.Char(3)
+  status           PaymentStatus  @default(PENDING)
+  paymentMethod    String?        @map("payment_method") // "card", "upi", "netbanking", ...
+  receiptUrl       String?        @map("receipt_url")
+  failureReason    String?        @map("failure_reason")
+  /// Denormalized running total of Refund rows against this payment, kept
+  /// in sync by refund.service.ts inside the same transaction that writes
+  /// a Refund. Lets integrity checks ("is there room left to refund?")
+  /// read one column instead of SUM()-ing Refunds on every request. A
+  /// migration-level CHECK (refunded_amount <= amount) should be added
+  /// as a second line of defense — Prisma schema cannot express CHECK
+  /// constraints directly.
+  refundedAmount   Decimal        @default(0) @map("refunded_amount") @db.Decimal(10, 2)
+  /// Raw gateway webhook payload, kept for audit/dispute resolution.
+  gatewayMetadata  Json?          @map("gateway_metadata")
+  paidAt           DateTime?      @map("paid_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  booking Booking  @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  refunds Refund[]
+
+  @@index([bookingId])
+  @@index([status])
+  @@index([gatewayOrderId])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+model Refund {
+  id            String       @id @default(uuid()) @db.Uuid
+  paymentId     String       @map("payment_id") @db.Uuid
+  bookingId     String       @map("booking_id") @db.Uuid
+  requestedById String       @map("requested_by_id") @db.Uuid
+  /// Admin/staff who approved or actioned the refund — distinct from
+  /// `requestedById`, which may be the traveler themselves. Nullable
+  /// until the refund is actually processed.
+  processedById String?      @map("processed_by_id") @db.Uuid
+  amount        Decimal      @db.Decimal(10, 2)
+  reason        String?
+  status        RefundStatus @default(REQUESTED)
+  gatewayRefundId String?    @unique @map("gateway_refund_id")
+  gatewayMetadata Json?      @map("gateway_metadata")
+  processedAt   DateTime?    @map("processed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  payment     Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  booking     Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  requestedBy User    @relation("RefundRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  processedBy User?   @relation("RefundProcessedBy", fields: [processedById], references: [id], onDelete: SetNull)
+
+  @@index([paymentId])
+  @@index([bookingId])
+  @@index([requestedById])
+  @@index([status])
+  @@map("refunds")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// REVIEWS
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Polymorphic over Homestay / TourPackage — see bottom-of-file note.
+/// Linking to `bookingId` (unique, optional) lets us mark `isVerifiedStay`
+/// and guarantees at most one review per completed booking.
+model Review {
+  id            String     @id @default(uuid()) @db.Uuid
+  userId        String     @map("user_id") @db.Uuid
+  targetType    TargetType @map("target_type")
+  homestayId    String?    @map("homestay_id") @db.Uuid
+  tourPackageId String?    @map("tour_package_id") @db.Uuid
+  bookingId     String?    @unique @map("booking_id") @db.Uuid
+
+  rating           Int       @db.SmallInt // 1–5; a migration-level CHECK (rating BETWEEN 1 AND 5) should back this app-layer validation
+  title            String?
+  comment          String?
+  images           String[]
+  isVerifiedStay   Boolean   @default(false) @map("is_verified_stay")
+  isApproved       Boolean   @default(true) @map("is_approved") // for moderation queues
+  ownerResponse    String?   @map("owner_response")
+  ownerRespondedAt DateTime? @map("owner_responded_at")
+  /// Reserved for a future AI moderation/insights pipeline (e.g.
+  /// automatic sentiment scoring to surface at-risk listings or flag
+  /// reviews for moderator attention). Nullable and unused until that
+  /// pipeline exists — no application code depends on it today.
+  sentimentScore   Decimal?  @map("sentiment_score") @db.Decimal(4, 3)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  /// Restrict (not Cascade): a review is public content relied on by
+  /// other users and by the homestay/tour package's aggregate rating.
+  /// Deleting a user's account must not silently delete their reviews —
+  /// GDPR erasure is handled by anonymizing the User row (see User doc
+  /// comment), which this FK continues to point at.
+  user        User         @relation("ReviewUser", fields: [userId], references: [id], onDelete: Restrict)
+  homestay    Homestay?    @relation(fields: [homestayId], references: [id], onDelete: Cascade)
+  tourPackage TourPackage? @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+  booking     Booking?     @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([homestayId, isApproved])
+  @@index([tourPackageId, isApproved])
+  @@map("reviews")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// WISHLIST
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Polymorphic over Homestay / TourPackage — see bottom-of-file note.
+model WishlistItem {
+  id            String     @id @default(uuid()) @db.Uuid
+  userId        String     @map("user_id") @db.Uuid
+  targetType    TargetType @map("target_type")
+  homestayId    String?    @map("homestay_id") @db.Uuid
+  tourPackageId String?    @map("tour_package_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  homestay    Homestay?    @relation(fields: [homestayId], references: [id], onDelete: Cascade)
+  tourPackage TourPackage? @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+
+  /// Prevents duplicate wishlisting. NULLS ARE DISTINCT in Postgres, so
+  /// these composite uniques only bite when the relevant column is set —
+  /// harmless no-op for the row's unused (null) target column.
+  @@unique([userId, homestayId])
+  @@unique([userId, tourPackageId])
+  @@index([userId])
+  /// Standalone indexes (not just the composites above) to support
+  /// analytics like "most-wishlisted homestays this month" without a
+  /// user-scoped predicate.
+  @@index([homestayId])
+  @@index([tourPackageId])
+  @@map("wishlist_items")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// COUPONS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Coupon {
+  id                String          @id @default(uuid()) @db.Uuid
+  code              String          @unique
+  description       String?
+  type              CouponType
+  value             Decimal         @db.Decimal(10, 2) // percentage points or fixed amount
+  maxDiscountAmount Decimal?        @map("max_discount_amount") @db.Decimal(10, 2) // cap for PERCENTAGE coupons
+  minBookingAmount  Decimal?        @map("min_booking_amount") @db.Decimal(10, 2)
+  appliesTo         CouponAppliesTo @default(ALL) @map("applies_to")
+  /// Optional scoping to a single listing; null means "any listing of
+  /// `appliesTo` type" is eligible.
+  homestayId        String?         @map("homestay_id") @db.Uuid
+  tourPackageId     String?         @map("tour_package_id") @db.Uuid
+  usageLimit        Int?            @map("usage_limit") // total redemptions allowed, null = unlimited
+  usageLimitPerUser Int?            @default(1) @map("usage_limit_per_user")
+  timesUsed         Int             @default(0) @map("times_used")
+  validFrom         DateTime        @map("valid_from")
+  validUntil        DateTime        @map("valid_until")
+  isActive          Boolean         @default(true) @map("is_active")
+  createdById       String          @map("created_by_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  createdBy   User          @relation("CouponCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  homestay    Homestay?     @relation(fields: [homestayId], references: [id], onDelete: Cascade)
+  tourPackage TourPackage?  @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+  bookings    Booking[]
+  usages      CouponUsage[]
+
+  // `code` is already indexed implicitly via its @unique constraint —
+  // no separate @@index([code]) needed.
+  @@index([isActive, validFrom, validUntil])
+  @@index([createdById])
+  @@index([homestayId])
+  @@index([tourPackageId])
+  @@map("coupons")
+}
+
+/// Tracks each redemption individually so `usageLimitPerUser` can be
+/// enforced with a simple COUNT query, and so `Coupon.timesUsed` can be
+/// audited/recomputed rather than trusted as the sole source of truth.
+model CouponUsage {
+  id        String   @id @default(uuid()) @db.Uuid
+  couponId  String   @map("coupon_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  bookingId String   @unique @map("booking_id") @db.Uuid
+  usedAt    DateTime @default(now()) @map("used_at")
+
+  coupon  Coupon  @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([couponId, userId])
+  @@map("coupon_usages")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id                String           @id @default(uuid()) @db.Uuid
+  userId            String           @map("user_id") @db.Uuid
+  type              NotificationType
+  title             String
+  message           String
+  isRead            Boolean          @default(false) @map("is_read")
+  readAt            DateTime?        @map("read_at")
+  /// Loose polymorphic pointer (e.g. "BOOKING" + booking.id) used only to
+  /// deep-link the notification in the UI. Intentionally has no FK — the
+  /// referenced entity type varies per NotificationType and notifications
+  /// must remain readable even if the source row is later hard-deleted.
+  relatedEntityType String?          @map("related_entity_type")
+  relatedEntityId   String?          @map("related_entity_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// BLOG
+// ─────────────────────────────────────────────────────────────────────────
+
+model Blog {
+  id            String     @id @default(uuid()) @db.Uuid
+  authorId      String     @map("author_id") @db.Uuid
+  title         String
+  slug          String     @unique
+  excerpt       String?
+  content       String
+  coverImageUrl String?    @map("cover_image_url")
+  /// TODO (follow-up migration): add a GIN index on `tags` for
+  /// containment search (`WHERE tags @> ARRAY[...]`) once query patterns
+  /// are confirmed — Prisma's schema language doesn't support specifying
+  /// the `array_ops` operator class needed here, so this has to be raw
+  /// SQL in a migration rather than declared in this file.
+  tags          String[]
+  status        BlogStatus @default(DRAFT)
+  publishedAt   DateTime?  @map("published_at")
+  viewCount     Int        @default(0) @map("view_count")
+
+  /// SEO
+  metaTitle       String? @map("meta_title")
+  metaDescription String? @map("meta_description")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  author       User              @relation("BlogAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  translations BlogTranslation[]
+
+  @@index([authorId])
+  @@index([status, deletedAt])
+  @@index([publishedAt])
+  @@map("blogs")
+}
+
+model BlogTranslation {
+  id      String  @id @default(uuid()) @db.Uuid
+  blogId  String  @map("blog_id") @db.Uuid
+  locale  String  @db.VarChar(10)
+  title   String
+  excerpt String?
+  content String?
+
+  blog Blog @relation(fields: [blogId], references: [id], onDelete: Cascade)
+
+  @@unique([blogId, locale])
+  @@map("blog_translations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Generic, append-only audit trail for sensitive/administrative actions
+/// (role changes, listing approvals/suspensions, refund approvals, price
+/// overrides, coupon creation, etc.) — covers security investigations and
+/// compliance reporting without bolting `updatedById`/change-history
+/// columns onto every individual model. `actorId` has a real, enforced FK
+/// to `User` (`onDelete: SetNull`) — audit rows must survive even if the
+/// actor's User row is later removed, so only the attribution is nulled
+/// out, never the record itself. (Corrected: this comment previously,
+/// incorrectly, described `actorId` as having no FK at all.)
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String // e.g. "HOMESTAY_APPROVED", "REFUND_ISSUED", "ROLE_CHANGED"
+  entityType String   @map("entity_type") // e.g. "Homestay", "Refund"
+  entityId   String?  @map("entity_id") @db.Uuid
+  /// Structured before/after diff or action-specific payload.
+  changes    Json?
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
