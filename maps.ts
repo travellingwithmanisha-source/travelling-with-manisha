@@ -47,7 +47,7 @@ export async function geocodeAddress(address: string): Promise<GeocodeResult | n
     return null;
   }
 
- const result = data.results[0];
+   const result = data.results[0];
 
   if (!result) {
     return null;
@@ -59,3 +59,4 @@ export async function geocodeAddress(address: string): Promise<GeocodeResult | n
     longitude: result.geometry.location.lng,
     placeId: result.place_id,
   };
+}
