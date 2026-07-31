@@ -1,5 +1,4 @@
 import { prisma } from "@/lib/prisma";
-import { stripe } from "@/lib/stripe";
 import { razorpay } from "@/lib/razorpay";
 import { PaymentGateway, PaymentStatus, BookingStatus, type Prisma } from "@prisma/client";
 
@@ -11,56 +10,34 @@ import { PaymentGateway, PaymentStatus, BookingStatus, type Prisma } from "@pris
  * international INR pricing or India-based USD pricing ever comes up.
  */
 
-function selectGateway(currency: string): PaymentGateway {
-  return currency.toUpperCase() === "INR" ? PaymentGateway.RAZORPAY : PaymentGateway.STRIPE;
+function selectGateway(): PaymentGateway {
+  return PaymentGateway.RAZORPAY;
 }
 
 export async function createPaymentIntent(bookingId: string) {
-  const booking = await prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
-  const gateway = selectGateway(booking.currency);
-  const amountInMinorUnits = Math.round(Number(booking.totalAmount) * 100);
-  const idempotencyKey = `booking_${booking.id}_${Date.now()}`;
+const booking = await prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
+const gateway = selectGateway();
+const amountInMinorUnits = Math.round(Number(booking.totalAmount) * 100);
+const idempotencyKey = `booking_${booking.id}_${Date.now()}`;
 
-  if (gateway === PaymentGateway.STRIPE) {
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      line_items: [
-        {
-          price_data: {
-            currency: booking.currency.toLowerCase(),
-            unit_amount: amountInMinorUnits,
-            product_data: { name: `Booking ${booking.bookingNumber}` },
-          },
-          quantity: 1,
-        },
-      ],
-      success_url: `${process.env.NEXT_PUBLIC_APP_URL}/bookings?success=1`,
-      cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/bookings?cancelled=1`,
-      metadata: { bookingId: booking.id },
-    });
-
-    await prisma.payment.create({
-      data: {
-        bookingId: booking.id,
-        gateway,
-        gatewayOrderId: session.id,
-        idempotencyKey,
-        amount: booking.totalAmount,
-        currency: booking.currency,
-        status: PaymentStatus.PENDING,
-      },
-    });
-
-    return { checkoutUrl: session.url };
-  }
-
+  if (!razorpay) {
+  throw new Error("Razorpay is not configured.");
+}
+if (!razorpay) {
+  throw new Error("Razorpay is not configured.");
+}
   // RAZORPAY
-  const order = await razorpay.orders.create({
-    amount: amountInMinorUnits,
-    currency: booking.currency,
-    receipt: booking.bookingNumber,
-    notes: { bookingId: booking.id },
-  });
+ // RAZORPAY
+if (!razorpay) {
+  throw new Error("Razorpay is not configured.");
+}
+
+const order = await razorpay!.orders.create({
+  amount: amountInMinorUnits,
+  currency: booking.currency,
+  receipt: booking.bookingNumber,
+  notes: { bookingId: booking.id },
+});
 
   await prisma.payment.create({
     data: {
