@@ -97,6 +97,6 @@
     "lint-staged": "15.3.0",
 
     "vitest": "2.1.8",
-    "@playwright/test": "1.49.1"
+    "@playwright/test": "^1.62.1"
   }
 }
